@@ -1,0 +1,4 @@
+,criterion,acc,num_epochs
+0,MSELoss,1.0,36
+1,BCELoss,1.0,43
+2,BCEWithLogitsLoss,1.0,64
