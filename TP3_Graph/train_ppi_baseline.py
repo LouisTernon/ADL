@@ -19,17 +19,19 @@ MODEL_STATE_FILE = path.join(path.dirname(path.abspath(__file__)), "model_state.
 
 
 class GATLayer(nn.Module):
-    def __init__(self, in_feats, out_feats, num_heads, activation=None, alpha=.2):
+    def __init__(self, in_feats, out_feats, num_heads, activation=None, alpha=.2, concat_heads=True):
         super(GATLayer, self).__init__()
-        self.linear_func = nn.Linear(in_feats, out_feats, bias=False)
-        self.attention_func = nn.Linear(2 * out_feats, 1, bias=False)
+        self.linear_func = nn.Linear(in_feats, out_feats * num_heads, bias=False)
+        self.attention_func = nn.Linear(2 * out_feats, num_heads, bias=False)
         self.alpha = alpha
         self.num_heads = num_heads
         self.activation = activation
+        self.out_features = out_feats
+        self.concat_heads = concat_heads
 
     def edge_attention(self, edges):
-        concat_z = torch.cat([edges.src['z'], edges.dst['z']], dim=1)
-        src_e = self.attention_func(concat_z)
+        concat_z = torch.cat([edges.src['z'], edges.dst['z']], dim=2)
+        src_e = torch.stack([concat_z[:, i].matmul(self.attention_func.weight[i, :].t()) for i in range(self.num_heads)]).t()
         src_e = F.leaky_relu(src_e, negative_slope=self.alpha)
         return {'e': src_e}
 
@@ -38,13 +40,17 @@ class GATLayer(nn.Module):
 
     def reduce_func(self, nodes):
         a = F.softmax(nodes.mailbox['e'], dim=1)
-        h = torch.sum(a * nodes.mailbox['z'], dim=1)
+        h = torch.sum(a.unsqueeze(-1) * nodes.mailbox['z'], dim=1)
+        if self.concat_heads:
+            h = h.view(-1, self.num_heads * self.out_features)
+        else:
+            h = torch.mean(h, dim=1)
         return {'h': h}
 
     def forward(self, graph, h):
         # graph = graph.local_var()
         z = self.linear_func(h)
-        graph.ndata['z'] = z
+        graph.ndata['z'] = z.view((-1, self.num_heads, self.out_features))
         graph.apply_edges(self.edge_attention)
         graph.update_all(self.message_func, self.reduce_func)
         h = graph.ndata.pop('h')
@@ -235,8 +241,8 @@ def main(args):
 
     # create the model, loss function and optimizer
     device = torch.device("cpu" if args.gpu < 0 else "cuda:" + str(args.gpu))
-    model_kwargs = {"num_heads":1}
-    model = MODELS[args.model](g=train_dataset.graph, n_layers=1, input_size=n_features,
+    model_kwargs = {"num_heads":5}
+    model = MODELS[args.model](g=train_dataset.graph, n_layers=2, input_size=n_features,
                                hidden_size=256, output_size=n_classes, activation=None, **model_kwargs).to(device)
     loss_fcn = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
